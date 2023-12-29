@@ -1,0 +1,450 @@
+---
+title: "Predictors of PM2.5 Concentration Levels Study"
+author: "Karnika Choudhury"
+date: "2023-11-25"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Predictors of PM2.5 Concentration Levels Study Introduction
+The three modeling approaches I have chosen for this project are linear regression, decision tree and k nearest neighbors modeling. I will use linear regression to determine whether there is a linear relationship between value and the predictor variables I have chosen. I also decided to use the decision tree model in case the the relationship between response and predictor variables is not linear. Decision trees are also good at capturing the interactions between various predictor variables. Finally, I decided to use the k nearest neighbors modeling approach because it is generally a good modeling approach and is applicable to many different datasets. It is also pretty straightforward to tune, so there is a lot of flexibility with the model itself and making it the optimal structure.
+
+The way I chose the predictor variables for the model was primarily through the correlation matrix, which can be seen in the Exploratory Data Analysis section. I chose imp_a10000 because it has one of the highest correlation coefficients, and same with log_pri_length_25000. Practically, these two variables also seem to be good predictors of pollution levels, as imp_a10000 refers to the amount of impervious surface within a 10000 meter radius. This typically proves indicative of the prevalence of sidewalks, which is associated with urban areas. Log_pri_length_2500 is the amount of country roads in 2500 meter radius, and this also makes sense as to why it is fairly strongly correlated with PM2.5 levels. Country roads have a lot of cars moving around, and cars emit large concentrations of PM2.5 by nature. Thus, there is a clear connection between the growing length of country roads and PM2.5 concentrations. Both these predictors involve the concept that an increase in cars will lead to an increase in PM2.5, and this makes sense as PM2.5 can often be directly emitted through a vehicle's combustion system (Reichmuth, 2021). The other two predictors were chosen not only because of their high correlation coefficient, but also because of both AOD and CMAQ were created by professionals like the EPA to measure PM2.5 concentrations in the air, so it is likely that they will be good predictors of PM2.5 levels.
+
+*Loading the Data*  
+```{r}
+library(tidyverse)
+dat <- read_csv("https://github.com/rdpeng/stat322E_public/raw/main/data/pm25_data.csv.gz")
+```
+*Exploratory Data Analysis*    
+
+```{r}
+# Look at correlation coefficient matrix for all the variables and value to see the best predictors
+correlatioin_matrix <- dat %>%
+  select(-state, -county, -city) %>%
+  cor()
+```
+
+Some predictor variables of note here with fairly large r vales (indicating strong correlation) are the imp_a predictors and log_pri_length variables. Let's take a closer look with scatterplots.
+```{r out.width="50%"}
+# Test correlation between value and imp_a10000 (highest correlation coefficient of the imp a predictors)   
+dat %>%
+  ggplot(aes(x = imp_a10000, y = value))  +
+    geom_point() +
+    labs(x = "Impervious Surface Measure of circle with radius 100000m (m)", y = "Annual Average PM2.5 Concentration (mcg/m^3)", title = "Annual Average PM2.5 Concentration vs Impervious Surface Measure of circle with radius 100000m (m)")
+```
+
+There appears to be a positive correlation between these two variables and the strength of the correlation makes sense as all the points are fairly centered around a line of best fit. This is furthered when looking at the correlation coefficient of 0.66. which is pretty high in comparison to the other predictors. 
+
+
+```{r out.width="50%"}
+# Test correlation between value and log_pri_length_25000
+dat %>%
+  ggplot(aes(x = log_pri_length_25000, y = value))  +
+    geom_point() +
+    labs(x = "Count of Primary Road Length within 25k m of monitor (m)", y = "Annual Average PM2.5 Concentration (mcg/m^3)", title = "Annual Average PM2.5 Concentration vs Count of Primary Road Length within 25k m of monitor (m)")
+```
+
+The spread of this data occurs similarly with the previous visual, as we still see this positive correlation and clustering of data around a line of best fit. This matches up with the fact that this correlation is 0.69, indicating it is a strong predictor of value.
+
+*RMSE Value Predictions*  
+Based on the results of the correlation matrix and the above graphics, the relationship among these variables does not appear to be particularly linear. This is why I believe that the decision tree modeling approach or kNN will have a lower RMSE value, as there does appear to be more of a clustering relationship that is non-linear. 
+
+#### Wrangling
+```{r}
+# select only necessary columns
+dat <- dat %>%
+  select(value, state, county, city, CMAQ, aod, imp_a10000, log_pri_length_25000) %>%
+  rename(
+    primary_road_length = log_pri_length_25000,
+    impervious_surface_measure = imp_a10000
+  )
+```
+There are several columns in this dataset, so I decided to clean it by isolating the dataset to only the columns we are focusing on.
+I also utilized the rename function to alter the names of the log_pri_length_25000 and imp_a10000 columns in order to make the code more readable and easier to understand during this study.
+
+#### Results
+Splitting Training and Testing Dataset
+```{r}
+library(rsample)
+# 2/3 split on data to make training and testing dataset
+split <- initial_split(dat, prop = 2/3)
+training <- training(split)
+testing <- testing(split)
+```
+
+Now that I have split the dataset, I will be comparing performance between linear model, decision tree model and kNN model. I will be using the process of creating a recipe, model, workflow, and then fitting it to the dataset to develop a set of predictions. I will then evaluate the performance of these models by RMSE values.   
+Model 1: Linear Model
+```{r}
+library(tidymodels)
+set.seed(1234)
+# create recipe
+rec_lm <- training %>%
+  recipe(value ~ impervious_surface_measure + primary_road_length + CMAQ + aod)
+
+# create model
+model_lm <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+# create workflow
+wf_lm <- workflow() %>%
+  add_recipe(rec_lm) %>%
+  add_model(model_lm)
+
+# create folds for cross validation
+folds_lm <- vfold_cv(training, v = 5)
+
+# fit folds and model
+model_fit <- fit_resamples(wf_lm, resamples = folds_lm)
+
+# observe RMSE
+rmse_lm <- model_fit %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  select(mean)
+rmse_lm
+```
+This is a rather large RMSE value, but let's look at the other models before jumping to any conclusions.  
+Model 2: Decision Tree Model
+```{r}
+# trees with higher depth have higher resolution, trees with higher depth have issue of overfitting, so it will perform well on training dataset but predicted values on testing dataset will perform poorly, we need trees with moderate depth (optimal value)
+set.seed(2234)
+# create recipe
+rec_dt <- training %>%
+  recipe(value ~ impervious_surface_measure + primary_road_length + CMAQ + aod) 
+
+# create model: set tuning parameters to be tuned later
+model_dt <- decision_tree(
+    cost_complexity = tune(),
+    tree_depth = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+# create workflow
+wf_dt <- workflow() %>%
+  add_recipe(rec_dt) %>%
+  add_model(model_dt)
+
+# create folds for cross validation
+folds_dt <- vfold_cv(training, v = 5)
+
+# tuning 
+tree_grid <- grid_regular(cost_complexity(),
+                          tree_depth(),
+                          levels = 5)
+
+# use tune_grid to use the folds to see different tuning parameters
+res <- wf_dt %>%
+  tune_grid(
+    resamples = folds_dt,
+    grid = tree_grid
+    )
+
+# look at the best RMSE value
+res %>%
+  show_best("rmse")
+
+# After tuning it is evident that the optimal parameters are cost complexity = 1.000000e-10 and tree_depth = 4, which produces an RMSE of 2.109094	
+# Let's overwrite the model with the new parameters and make new workflow and folds
+model_dt <- decision_tree(
+    cost_complexity = 1.000000e-10,
+    tree_depth = 4) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+# new workflow
+wf_dt <- workflow() %>%
+  add_recipe(rec_dt) %>%
+  add_model(model_dt)
+
+# new folds for cross validation
+folds_dt <- vfold_cv(training, v = 5)
+
+# fit the model
+model_fit <- fit_resamples(wf_dt, resamples = folds_dt)
+
+# look at RMSE value again
+rmse_dt <- model_fit %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  select(mean)
+rmse_dt
+
+```
+
+This definitely performed better than the linear model, suggesting that the variables might not be good LINEAR predictors but decent predictors overall.  
+Model 3: K Nearest Neighbors Model
+```{r}
+set.seed(3903)
+# create recipe
+rec_knn <- training %>%
+  recipe(value ~ impervious_surface_measure + primary_road_length + CMAQ + aod)
+
+# create model
+model_knn <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+# create workflow
+wf_knn <- workflow() %>%
+  add_recipe(rec_knn) %>%
+  add_model(model_knn)
+
+# create folds for cross validation
+folds_knn <- vfold_cv(training, v = 5)
+
+# make the grid with the test tuning values
+knn_grid <- c(12,14,16,18)
+
+# tuning again
+res_knn <- wf_knn %>%
+  tune_grid(
+    resamples = folds_knn,
+    grid = knn_grid
+    )
+
+# applt tune grid to get the produce models with various
+res <- tune_grid(wf_knn, resamples = folds_knn, grid = tibble(neighbors = c(12, 14, 16, 18)))
+res %>%
+  show_best("rmse")
+# After tuning we see that 14 neighbors provides the lowest RMSE value of 2.059174, so we will use that for our model
+# Let's overwrite the model with the new parameters and make new workflow and folds
+model_knn <- nearest_neighbor(neighbors = 14) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+# make new workflow for kNN
+wf_knn <- workflow() %>%
+  add_recipe(rec_knn) %>%
+  add_model(model_knn)
+
+# make new folds for cross validation
+folds_knn <- vfold_cv(training, v = 5)
+
+# make new model
+model_fit <- fit_resamples(wf_knn, resamples = folds_knn)
+
+# fit model to see RMSE
+rmse_knn <- model_fit %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  select(mean)
+rmse_knn
+```
+*Table with Model and RMSE Values*  
+```{r}
+table <- data.frame(
+  Model_Name = c("Linear", "Decision Tree", "k Nearest Neighbors"),
+  RMSE = c(2.262891, 2.126812, 2.063239)
+)
+table
+```
+
+Based on RMSE values, it is clear that the kNN model with 14 neighbors is best at predicting values for this dataset. Let's evaluate the RMSE on the testing dataset.
+```{r}
+set.seed(4)
+# create workflow
+final_wf <- workflow() %>%
+  add_recipe(rec_knn) %>%
+  add_model(model_knn)
+
+# use last fit to use whole training dataset and test on testing dataset
+final_res <- final_wf %>%
+  last_fit(split)
+
+# look at the RMSE value
+final_res %>%
+  collect_metrics()
+```
+We get an RMSE value of 1.9275019, which is pretty close to the RMSE values that were found from the **training** datasets of the kNN model and even lower! This indicates that I tuned correctly and the model works well for the training and test dataset.
+
+*Test Performance of the Models*  
+```{r out.width="50%"}
+# Test performance of the models
+# Linear Model Predicted vs Actual 
+# Assess model fit / predictions
+model_fit <- fit(wf_lm, data = training)
+dat_model <- rec_lm %>% 
+    prep(training) %>% 
+    bake(new_data = testing)
+
+# Extract the model fit and create a column for predictions
+model_fit %>% 
+    extract_fit_parsnip() %>% 
+    augment(new_data = dat_model)
+
+# Plot observed vs. predicted outcomes
+model_fit %>% 
+    extract_fit_parsnip() %>% 
+    augment(new_data = dat_model) %>% 
+    ggplot(aes(.pred, value)) + 
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1) +
+    labs(title = "Check Effectiveness of Linear Regression Model", x = "Predicted Values", y = "Actual Values")
+
+# Decision Tree Model Predicted vs Actual
+# Assess model fit / predictions
+model_fit <- fit(wf_dt, data = training)
+dat_model <- rec_dt %>% 
+    prep(training) %>% 
+    bake(new_data = testing)
+
+# Extract the model fit and create a column for predictions
+model_fit %>% 
+    extract_fit_parsnip() %>% 
+    augment(new_data = dat_model)
+
+# Plot observed vs. predicted outcomes
+model_fit %>% 
+    extract_fit_parsnip() %>% 
+    augment(new_data = dat_model) %>% 
+    ggplot(aes(.pred, value)) + 
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1) +
+    labs(title = "Check Effectiveness of Decision Tree Model", x = "Predicted Values", y = "Actual Values")
+
+# Knn Model Predicted vs Actual
+# Assess model fit / predictions
+model_fit <- fit(wf_knn, data = training)
+dat_model <- rec_knn %>% 
+    prep(training) %>% 
+    bake(new_data = testing) 
+
+# Extract the model fit and create a column for predictions
+model_fit %>% 
+    extract_fit_parsnip() %>% 
+    augment(new_data = dat_model)
+
+# Plot observed vs. predicted outcomes
+model_fit %>% 
+    extract_fit_parsnip() %>% 
+    augment(new_data = dat_model) %>% 
+    ggplot(aes(.pred, value)) + 
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1) +
+    labs(title = "Check Effectiveness of kNN Model", x = "Predicted Values", y = "Actual Values")
+# save the predicted values for later questions
+knn_predictedvals_test <- model_fit %>% 
+    extract_fit_parsnip() %>% 
+    augment(new_data = dat_model)
+```
+#### Discussion
+*Primary Questions*  
+1. Based on test set performance, at what locations does your model give predictions that are closest and furthest from the observed values? What do you hypothesize are the reasons for the good or bad performance at these locations?
+```{r}
+# use last fit to fit on test data
+res <- final_wf %>%
+  last_fit(split)
+
+# get the predictions
+prediction_model <- res %>%
+  collect_predictions()
+
+# combine testing and the prediction model so we have the prediction data along with state, county etc.
+combined <- inner_join(prediction_model, testing, by="value")
+# add column to see where residuals (predictions-observed) are greatest and least to answer question
+combined <- combined %>%
+  mutate(residuals = abs(.pred-value))
+
+# most accurate predictions
+combined %>%
+  arrange(residuals) %>%
+  head(5)
+
+# least accurate predictions
+combined %>%
+  arrange(desc(residuals)) %>%
+  head(5)
+```
+
+**The locations with the most accurate prediction values are Arkansas, Oregon, Texas, Delaware and Michigan. The locations with the least accurate prediction values are various parts of California, Pennsylvania and California. I believe that the good performance in Texas and the other five countries are because a lot of their PM2.5 values are associated with their impervious surface coverage, country road coverage, and they do not really have a lot of policies aimed towards regulating PM2.5 levels. The poor performance of the model on California, Nevada and Pennsylvania is likely because these countries have enacted sustainability policies that help curve PM2.5 levels in other categories, such as raising standards for fuel efficient cars. Thus, even though they may have a lot of country roads and impervious surfaces, they have policies that ensure that the cars are more environmentally friendly.** 
+
+2. What variables might predict where your model performs well or not? For example, are their regions of the country where the model does better or worse? Are there variables that are not included in this dataset that you think might improve the model performance if they were included in your model?
+```{r}
+# most accurate predictions
+combined %>%
+  arrange(residuals) %>%
+  head(10)
+
+# least accurate predictions
+combined %>%
+  arrange(desc(residuals)) %>%
+  head(10)
+```
+
+**One of the variables is likely state, as we can see here that most of the states that the model does not perform well on are states located on the west coast, like California, Nevada and Arizona, New Mexico. The model appears to perform better with states located in the southeast part of the US, like Texas, Arkansas, Georgia and Iowa. Another variable that could predict where the model performs well is somecollege, as the countries with higher some college rates are not well predicted with the model while those with higher are predicted well with the model. I think one variable that could be useful in this dataset would be something to do with automobiles, like the average automobile use versus public transportation. Countries on the west coast are more likely to use public transportation, so cars are less frequently used and that could improve the model a lot.** 
+
+3. There is interest in developing more cost-effect approaches to monitoring air pollution on the ground. Two candidates for replacing the use of ground-based monitors are numerical models like CMAQ and satellite-based observations such as AOD. How well do CMAQ and AOD predict ground-level concentrations of PM2.5? How does the prediction performance of your model change when CMAQ or aod are included (or not included) in the model?
+```{r}
+# RMSE value with only CMAQ and aod
+set.seed(1982)
+# set recipe
+rec_knn_two <- training %>%
+  recipe(value ~ CMAQ + aod)
+
+# create model
+model_knn_two <- nearest_neighbor(neighbors = 14) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+# create workflow
+wf_knn_two <- workflow() %>%
+  add_recipe(rec_knn_two) %>%
+  add_model(model_knn_two)
+
+# create folds for cross validation
+folds_knn_two <- vfold_cv(training, v = 5)
+
+# fit folds
+model_fit_two <- fit_resamples(wf_knn_two, resamples = folds_knn_two)
+
+# look at RMSE
+model_fit_two %>%
+  collect_metrics()
+
+# prediction performance of model when CMAQ and AOD are taken out
+set.seed(5556)
+rec_knn_modified <- training %>%
+  recipe(value ~ impervious_surface_measure + primary_road_length)
+
+# create model
+model_knn_modified <- nearest_neighbor(neighbors = 14) %>%
+  set_engine("kknn") %>%
+  set_mode("regression")
+
+# create workflow
+wf_knn_modified <- workflow() %>%
+  add_recipe(rec_knn_modified) %>%
+  add_model(model_knn_modified)
+
+# create folds for cross validation
+folds_knn_modified <- vfold_cv(training, v = 5)
+
+# fit on folds
+model_fit_modified <- fit_resamples(wf_knn_modified, resamples = folds_knn_modified)
+
+# look at RMSE
+model_fit_modified %>%
+  collect_metrics()
+```
+**The two variables aod and CMAQ alone have a decent RMSE value of about 2.437. My optimal model gave an RMSE value of about 2.07, but this one does not do much worse despite the fact that my optimal model had two extra predictors that helped bring it down to 2.07. The excellent performance of the aod and CMAQ are further reiterated by the fact that when I took out aod and CMAQ and the RMSE value dropped from 2.07 to 2.437 The RMSE for my optimal model significantly increased, suggesting that CMAQ and aod were good predictors of the PM2.5 value.**
+
+4. The dataset here did not include data from Alaska or Hawaii. Do you think your model will perform well or not in those two states? Explain your reasoning.  
+**Because my model performed fairly well with states near the coastline, I believe there is just argument to believe that my model will perform fairly well in those regions. However, Alaska and Hawaii do have unique factors that are not considered in my model. Hawaii has a large concentration of volcanoes, which contribute greatly to the state's PM2.5 concentrations in the atmosphere (IVHHN, n.d.). Therefore, the PM2.5 levels are likely to be disproportionate to the meters of country road and impervious surfaces, because this external factor of the volcanoes is not considered. For Alaska, where temperatures are abnormally low, PM2.5 concentrations can be attributed to the extreme cold weather (alaska.gov, n.d.). Once again we see that there are other factors that the model does not account for, which could lead to a higher RMSE when tested on these countries.**  
+
+*Reflect on Process*  
+The process of conducting the project was rather difficult because of the independence we were given in terms of design decisions and choosing which models to use. I had to consult various resources such as the parsnips package documentation for each model, and tmwr.org in order to fully understand how to conduct this project. I also had to do research on the topic itself, and understand how the different listed predictors contributed to PM2.5 concentrations. I also struggled to fully understand how to create the models, and I learned how all the different parts of prediction modeling worked by consulting the slides and the parsnips documentation. I also fully understood how to tune models and identify the optimal set of parameters, and how different parameters can affect the performance of the model, as well as the point where diminishing marginal returns occurs. 
+
+*Reflect on Performance of Final Model*  
+The model performed as well as I expected, but I did not expect much because I am aware that the models we went over in class are very broad and simple models that cannot fully predict the PM2.5 values as I had wished. Another reason the final prediction model did not perform particularly well is likely because I used the correlation matrix to identify the predictors, and there is a chance that other predictors did perform well but did not have a strong linear correlation (perhaps quadratic or exponential instead).
+
+### Acknowledgements
+|   Fairbanks PM2.5. alaska.gov.(n.d.). https://dec.alaska.gov/air/anpms/communities/fbks-pm2-5-background/   
+|   Real-time &amp; historic&nbsp;air quality data. IVHHN. (n.d.). https://vog.ivhhn.org/current-air-quality   
+|   Reichmuth, D. (2021, June 7). Air pollution from cars, trucks, and buses in the US: Everyone is exposed, but the burdens are not equally shared. The Equation. https://blog.ucsusa.org/dave-reichmuth/air-pollution-from-cars-trucks-and-buses-in-the-u-s-everyone-is-exposed-but-the-burdens-are-not-equally-shared/#:~:text=The%20burning%20of%20fossil%20fuels,is%20present%20in%20vehicle%20exhaust   
